@@ -1,44 +1,58 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
+from etl.rename_rows import rename_rows
+from etl.load_db import load_in_db
+from config import *
 
 spark = SparkSession.builder.getOrCreate()
 
-df = spark.read.csv("./csv/ministerios-publicos-actos-procesales-2021-semestre-1.csv", header=True)
-remove_column = (
-        df.select(
-                "provincia_nombre", "delito_descripcion",
-                "caso_fecha_inicio","autor_genero",
-                "autor_edad"
-        )
+# ---------------------------------------      EXTRACT STAGE      ---------------------------------------
+
+df = spark.read.csv("./csv/*.csv", header=True) # Read the csvs from 2013 to 2021. All files have 1,1GB aproximately.
+
+select_columns = (
+	df.select(
+		"provincia_nombre", 
+		"delito_descripcion",
+		"caso_fecha_inicio",
+		"autor_genero",
+	)
 )
 
+# ---------------------------------------      TRANSFORM STAGE       ---------------------------------------
 
-clean_df = (remove_column
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Hurto.*", "Hurto"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Robo.*", "Robo"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Abuso.sexual.*", "Abuso sexual"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Lesiones.leves.*", "Lesiones leves"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Amenazas.*", "Amenazas"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Homicidio.*", "Homicidio"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Coacciones.*", "Coacciones"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Estafa.*", "Estafa"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Encubrimiento.*", "Encubrimiento"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Violación.de.medidas.contra.epidemias.*", "Violación de medidas contra epidemias"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Lesiones.culposas.*", "Lesiones culposas graves o gravísimas"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Desobediencia.a.la.autoridad.*", "Desobediencia a la autoridad"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Daños de una cosa mueble o inmueble o un animal.*", "Daños de una cosa mueble o inmueble o un animal"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Resistencia.o.desobediencia.a.un.funcionario.público.*", "Resistencia o desobediencia a un funcionario público"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Instigación.o.ayuda.al.suicidio.*", "Instigación o ayuda al suicidio"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Violación.de.domicilio.*", "Violación de domicilio"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^\"?Usurpación.*", "Usurpación"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Daños.+.Art\..183.*", "Daños"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^Defraudación.+Art. 173*", "Defraudación"))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^\d+$", ""))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^#N/A.*", ""))
-        .withColumn("delito_descripcion", regexp_replace("delito_descripcion", r"^A.caratular.*", ""))
-        .filter(col("delito_descripcion") != "")
-)
+# It's all regular expression for rename each row in the column "delito_descripcion"
+crime_descrip_regx = [
+	[r"^Hurto.*", "Hurto"], [r"^Robo.*", "Robo"],
+	[r"^Abuso.sexual.*", "Abuso sexual"], [r"^Lesiones.leves.*", "Lesiones leves"],
+	[r"^Amenazas.*", "Amenazas"], [ r"^Homicidio.*", "Homicidio"],
+	[r"^Homicidio.*", "Homicidio"], [r"^Coacciones.*", "Coacciones"],
+	[r"^Estafa.*", "Estafa"], [r"^Encubrimiento.*", "Encubrimiento"],
+	[r"^Violación.de.medidas.contra.epidemias.*", "Violación de medidas contra epidemias"],
+	[r"^Lesiones.culposas.*", "Lesiones culposas graves o gravísimas"],
+	[r"^Desobediencia.a.la.autoridad.*", "Desobediencia a la autoridad"],
+	[r"^Daños de una cosa mueble o inmueble o un animal.*", "Daños de una cosa mueble o inmueble o un animal"],
+	[r"^Resistencia.o.desobediencia.a.un.funcionario.público.*", "Resistencia o desobediencia a un funcionario público"],
+	[r"^Instigación.o.ayuda.al.suicidio.*", "Instigación o ayuda al suicidio"],
+	[r"^Violación.de.domicilio.*", "Violación de domicilio"],
+	[r"^\"?Usurpación.*", "Usurpación"],
+	[r"^Daños.+.Art\..183.*", "Daños"],
+	[r"^Defraudación.+Art. 173*", "Defraudación"],
+	[r"^\d+$", ""], [r"^#N/A.*", ""],
+	[r"^A.caratular.*", ""]
+]
 
-grouping_df = clean_df.groupBy("delito_descripcion").count().orderBy("count", ascending=False)
+#Rename the rows. Especially the rows that contain Articles or don't have a valid value.
+rename_crime_description = rename_rows(dataframe=select_columns, column="delito_descripcion", regxs=crime_descrip_regx) 
 
-grouping_df.coalesce(1).write.format("com.databricks.spark.csv").save("spark")
+#Filter the void area because in the rename_rows function the are regular expression that change to "" in base some criteria
+filter_voids = rename_crime_description.filter(
+		(col("delito_descripcion") != "") & 
+		(col("caso_fecha_inicio") != "") & 
+		((col("autor_genero") == "F") | (col("autor_genero") == "M")) & 
+		(col("provincia_nombre") != "")
+	)
+
+# ---------------------------------------      LOAD STAGE      ---------------------------------------
+
+filter_voids.foreach(lambda x: load_in_db(x, db)) #Load in Database. The compressed file contain 65,5MB around.
